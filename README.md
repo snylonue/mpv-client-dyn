@@ -2,6 +2,10 @@
 
 Bindings for libmpv client API that allow you to create plugins for MPV in Rust.
 
+This is a fork of [TheCactusVert/mpv-client](https://github.com/TheCactusVert/mpv-client) that supports developing mpv c plugins on windows.
+
+Currently, this crate is compatible with the original one.
+
 ## Example
 
 Here is an example for your `Cargo.toml`:
@@ -17,13 +21,13 @@ name = "mpv_plugin"
 crate-type = ["cdylib"]
 
 [dependencies]
-mpv-client = "0.5.0"
+mpv-client-dyn = "0.5.0"
 ```
 
 And then the code `src/lib.rs`:
 
 ```rust
-use mpv_client::{mpv_handle, Event, Handle};
+use mpv_client_dyn::{mpv_handle, Event, Handle};
 
 #[no_mangle]
 extern "C" fn mpv_open_cplugin(handle: *mut mpv_handle) -> std::os::raw::c_int {
