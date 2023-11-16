@@ -1,4 +1,81 @@
+#![allow(non_upper_case_globals)]
+
 use std::ffi::{c_char, c_double, c_int, c_longlong, c_ulonglong, c_void};
+
+use libloading::{Library, Symbol};
+use once_cell::sync::Lazy;
+
+type LazySymbol<T> = Lazy<Symbol<'static, T>>;
+
+pub static MPV_LIB: Lazy<Library> = Lazy::new(|| unsafe { Library::new("mpv.exe").unwrap() });
+
+pub static mpv_error_string: LazySymbol<unsafe extern "C" fn(mpv_error) -> *const c_char> =
+    Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_error_string").unwrap() });
+
+pub static mpv_free: LazySymbol<unsafe extern "C" fn(*mut c_void) -> ()> =
+    Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_free").unwrap() });
+
+pub static mpv_client_name: LazySymbol<unsafe extern "C" fn(*mut mpv_handle) -> *const c_char> =
+    Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_client_name").unwrap() });
+
+pub static mpv_client_id: LazySymbol<unsafe extern "C" fn(*mut mpv_handle) -> c_longlong> =
+    Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_client_id").unwrap() });
+
+pub static mpv_create: LazySymbol<unsafe extern "C" fn() -> *mut mpv_handle> =
+    Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_create").unwrap() });
+
+pub static mpv_initialize: LazySymbol<unsafe extern "C" fn(*mut mpv_handle) -> mpv_error> =
+    Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_initialize").unwrap() });
+
+pub static mpv_destroy: LazySymbol<unsafe extern "C" fn(*mut mpv_handle) -> ()> =
+    Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_destroy").unwrap() });
+
+pub static mpv_create_client: LazySymbol<
+    unsafe extern "C" fn(*mut mpv_handle, *const c_char) -> *mut mpv_handle,
+> = Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_create_client").unwrap() });
+
+pub static mpv_create_weak_client: LazySymbol<
+    unsafe extern "C" fn(*mut mpv_handle, *const c_char) -> *mut mpv_handle,
+> = Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_create_weak_client").unwrap() });
+
+pub static mpv_command: LazySymbol<
+    unsafe extern "C" fn(*mut mpv_handle, *const *const c_char) -> mpv_error,
+> = Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_command").unwrap() });
+
+pub static mpv_command_async: LazySymbol<
+    unsafe extern "C" fn(*mut mpv_handle, c_ulonglong, *const *const c_char) -> mpv_error,
+> = Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_command_async").unwrap() });
+
+pub static mpv_set_property: LazySymbol<
+    unsafe extern "C" fn(*mut mpv_handle, *const c_char, c_int, *const c_void) -> mpv_error,
+> = Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_set_property").unwrap() });
+
+pub static mpv_get_property: LazySymbol<
+    unsafe extern "C" fn(*mut mpv_handle, *const c_char, c_int, *const c_void) -> mpv_error,
+> = Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_get_property").unwrap() });
+
+pub static mpv_observe_property: LazySymbol<
+    unsafe extern "C" fn(*mut mpv_handle, c_ulonglong, *const c_char, c_int) -> mpv_error,
+> = Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_observe_property").unwrap() });
+
+pub static mpv_unobserve_property: LazySymbol<
+    unsafe extern "C" fn(*mut mpv_handle, c_ulonglong) -> mpv_error,
+> = Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_unobserve_property").unwrap() });
+
+pub static mpv_event_name: LazySymbol<unsafe extern "C" fn(mpv_event_id) -> *const c_char> =
+    Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_event_name").unwrap() });
+
+pub static mpv_wait_event: LazySymbol<
+    unsafe extern "C" fn(*mut mpv_handle, c_double) -> *mut mpv_event,
+> = Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_wait_event").unwrap() });
+
+pub static mpv_hook_add: LazySymbol<
+    unsafe extern "C" fn(*mut mpv_handle, c_ulonglong, *const c_char, c_int) -> mpv_error,
+> = Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_hook_add").unwrap() });
+
+pub static mpv_hook_continue: LazySymbol<
+    unsafe extern "C" fn(*mut mpv_handle, c_ulonglong) -> mpv_error,
+> = Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_hook_continue").unwrap() });
 
 #[repr(i32)]
 #[allow(dead_code)]
@@ -137,43 +214,4 @@ pub struct mpv_event {
     pub error: mpv_error,
     pub reply_userdata: c_ulonglong,
     pub data: *mut c_void,
-}
-
-extern "C" {
-    pub fn mpv_error_string(error: mpv_error) -> *const c_char;
-    pub fn mpv_free(data: *mut c_void);
-    pub fn mpv_client_name(ctx: *mut mpv_handle) -> *const c_char;
-    pub fn mpv_client_id(ctx: *mut mpv_handle) -> c_longlong;
-    pub fn mpv_create() -> *mut mpv_handle;
-    pub fn mpv_initialize(ctx: *mut mpv_handle) -> mpv_error;
-    pub fn mpv_destroy(ctx: *mut mpv_handle);
-    //pub fn mpv_terminate_destroy(ctx: *mut mpv_handle);
-    pub fn mpv_create_client(ctx: *mut mpv_handle, name: *const c_char) -> *mut mpv_handle;
-    pub fn mpv_create_weak_client(ctx: *mut mpv_handle, name: *const c_char) -> *mut mpv_handle;
-    //pub fn mpv_load_config_file(ctx: *mut mpv_handle, filename: *const c_char) -> mpv_error;
-    pub fn mpv_command(ctx: *mut mpv_handle, args: *const *const c_char) -> mpv_error;
-    pub fn mpv_command_async(
-        ctx: *mut mpv_handle,
-        reply_userdata: c_ulonglong,
-        args: *const *const c_char,
-    ) -> mpv_error;
-    pub fn mpv_set_property(ctx: *mut mpv_handle, name: *const c_char, format: c_int, data: *const c_void)
-        -> mpv_error;
-    pub fn mpv_get_property(ctx: *mut mpv_handle, name: *const c_char, format: c_int, data: *mut c_void) -> mpv_error;
-    pub fn mpv_observe_property(
-        mpv: *mut mpv_handle,
-        reply_userdata: c_ulonglong,
-        name: *const c_char,
-        format: c_int,
-    ) -> mpv_error;
-    pub fn mpv_unobserve_property(mpv: *mut mpv_handle, registered_reply_userdata: c_ulonglong) -> mpv_error;
-    pub fn mpv_event_name(event: mpv_event_id) -> *const c_char;
-    pub fn mpv_wait_event(ctx: *mut mpv_handle, timeout: c_double) -> *mut mpv_event;
-    pub fn mpv_hook_add(
-        ctx: *mut mpv_handle,
-        reply_userdata: c_ulonglong,
-        name: *const c_char,
-        priority: c_int,
-    ) -> mpv_error;
-    pub fn mpv_hook_continue(ctx: *mut mpv_handle, id: c_ulonglong) -> mpv_error;
 }
