@@ -1,87 +1,101 @@
+use crate::{
+    ffi::{mpv_format, mpv_node},
+    Node, RustOwnedNode,
+};
+
 use super::ffi::mpv_free;
-use super::Result;
 
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::{
+    ffi::{c_char, c_longlong, c_void, CStr, CString},
+    mem::MaybeUninit,
+};
 
-pub trait Format: Sized + Default {
-    const MPV_FORMAT: i32;
-    fn from_ptr(ptr: *const c_void) -> Result<Self>;
-    fn to_mpv<F: Fn(*const c_void) -> Result<()>>(self, fun: F) -> Result<()>;
-    fn from_mpv<F: Fn(*mut c_void) -> Result<()>>(fun: F) -> Result<Self>;
+/// # Safety
+///
+/// `from_ptr` should not take ownship of `ptr`.
+/// `MPV_FORMAT` should be corresponding to the `Self::Raw` type whose pointer will be passed to mpv.
+pub unsafe trait FromMpv {
+    const MPV_FORMAT: mpv_format;
+
+    type Raw;
+
+    /// # Safety
+    ///
+    /// `ptr` should be valid and its underlying type should be corresponding to `Self::MPV_FORMAT`.
+    unsafe fn from_ptr(ptr: *const c_void) -> Self;
+
+    /// # Safety
+    ///
+    /// `inited` should be properly inited.
+    unsafe fn from_raw(inited: MaybeUninit<Self::Raw>) -> Self;
 }
 
-impl Format for String {
-    const MPV_FORMAT: i32 = 1;
+unsafe impl FromMpv for i64 {
+    const MPV_FORMAT: mpv_format = mpv_format::MPV_FORMAT_INT64;
 
-    fn from_ptr(ptr: *const c_void) -> Result<Self> {
+    type Raw = c_longlong;
+
+    unsafe fn from_ptr(ptr: *const c_void) -> Self {
+        *(ptr as *const c_longlong) as Self
+    }
+
+    unsafe fn from_raw(inited: MaybeUninit<Self::Raw>) -> Self {
+        inited.assume_init() as Self
+    }
+}
+
+unsafe impl FromMpv for String {
+    const MPV_FORMAT: mpv_format = mpv_format::MPV_FORMAT_STRING;
+
+    type Raw = *const c_char;
+
+    unsafe fn from_ptr(ptr: *const c_void) -> Self {
         let ptr = ptr as *const *const c_char;
-        Ok(unsafe { CStr::from_ptr(*ptr) }.to_str()?.to_string())
+        CStr::from_ptr(*ptr).to_string_lossy().into_owned()
     }
 
-    fn to_mpv<F: Fn(*const c_void) -> Result<()>>(self, fun: F) -> Result<()> {
-        let str = CString::new::<String>(self.into())?;
-        fun(&str.as_ptr() as *const *const c_char as *const c_void)
+    unsafe fn from_raw(inited: MaybeUninit<Self::Raw>) -> Self {
+        let ptr = inited.assume_init();
+        let res = <Self as FromMpv>::from_ptr(&ptr as *const *const c_char as _);
+        mpv_free(ptr as _);
+        res
+    }
+}
+
+unsafe impl FromMpv for Node {
+    const MPV_FORMAT: mpv_format = mpv_format::MPV_FORMAT_NODE;
+
+    type Raw = mpv_node;
+
+    unsafe fn from_ptr(ptr: *const c_void) -> Self {
+        Self::from_mpv_node(&*(ptr as *const _))
     }
 
-    fn from_mpv<F: Fn(*mut c_void) -> Result<()>>(fun: F) -> Result<Self> {
-        let mut ptr: *mut c_char = std::ptr::null_mut();
-        fun(&mut ptr as *mut _ as *mut c_void).and_then(|()| unsafe {
-            let str = CStr::from_ptr(ptr);
-            let str = str.to_str().map(|s| s.to_owned());
-            mpv_free(ptr as *mut c_void);
-            Ok(str?)
+    unsafe fn from_raw(inited: MaybeUninit<Self::Raw>) -> Self {
+        Self::from_mpv_node(&inited.assume_init())
+    }
+}
+
+/// # Safety
+///
+/// pointers in returned `mpv_node` should live longer enough.
+/// implementations should set `mpv_node.format` correctly
+pub unsafe trait ToMpv {
+    fn to_node(self) -> RustOwnedNode;
+}
+
+unsafe impl ToMpv for &str {
+    fn to_node(self) -> RustOwnedNode {
+        let s = CString::new(self).unwrap();
+        RustOwnedNode(mpv_node {
+            u: crate::ffi::Data { string: s.into_raw() },
+            format: mpv_format::MPV_FORMAT_STRING,
         })
     }
 }
 
-impl Format for bool {
-    const MPV_FORMAT: i32 = 3;
-
-    fn from_ptr(ptr: *const c_void) -> Result<Self> {
-        Ok(unsafe { *(ptr as *const c_int) != 0 })
-    }
-
-    fn to_mpv<F: Fn(*const c_void) -> Result<()>>(self, fun: F) -> Result<()> {
-        let data = self as c_int;
-        fun(&data as *const _ as *const c_void)
-    }
-
-    fn from_mpv<F: Fn(*mut c_void) -> Result<()>>(fun: F) -> Result<Self> {
-        let mut data = Self::default() as c_int;
-        fun(&mut data as *mut _ as *mut c_void).map(|()| data != 0)
-    }
-}
-
-impl Format for i64 {
-    const MPV_FORMAT: i32 = 4;
-
-    fn from_ptr(ptr: *const c_void) -> Result<Self> {
-        Ok(unsafe { *(ptr as *const Self) })
-    }
-
-    fn to_mpv<F: Fn(*const c_void) -> Result<()>>(self, fun: F) -> Result<()> {
-        fun(&self as *const _ as *const c_void)
-    }
-
-    fn from_mpv<F: Fn(*mut c_void) -> Result<()>>(fun: F) -> Result<Self> {
-        let mut data = Self::default();
-        fun(&mut data as *mut _ as *mut c_void).map(|()| data)
-    }
-}
-
-impl Format for f64 {
-    const MPV_FORMAT: i32 = 5;
-
-    fn from_ptr(ptr: *const c_void) -> Result<Self> {
-        Ok(unsafe { *(ptr as *const Self) })
-    }
-
-    fn to_mpv<F: Fn(*const c_void) -> Result<()>>(self, fun: F) -> Result<()> {
-        fun(&self as *const _ as *const c_void)
-    }
-
-    fn from_mpv<F: Fn(*mut c_void) -> Result<()>>(fun: F) -> Result<Self> {
-        let mut data = Self::default();
-        fun(&mut data as *mut _ as *mut c_void).map(|()| data)
+unsafe impl ToMpv for Node {
+    fn to_node(self) -> RustOwnedNode {
+        RustOwnedNode(self.to_raw_node())
     }
 }

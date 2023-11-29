@@ -1,15 +1,15 @@
 mod error;
-mod ffi;
-mod format;
+pub mod ffi;
+pub mod format;
 
 pub use error::{Error, Result};
 use ffi::*;
-pub use format::Format;
+use format::{FromMpv, ToMpv};
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_double, c_int, c_longlong, c_void, CStr, CString};
 use std::fmt;
-use std::mem::{ManuallyDrop, MaybeUninit};
+use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut, NonNull};
 
@@ -494,10 +494,10 @@ impl Property {
         unsafe { CStr::from_ptr((*self.0).name) }.to_str().unwrap_or("unknown")
     }
 
-    pub fn data<T: Format>(&self) -> Option<T> {
+    pub fn data<T: FromMpv>(&self) -> Option<T> {
         unsafe {
-            if (*self.0).format == T::MPV_FORMAT {
-                T::from_ptr((*self.0).data).ok()
+            if (*self.0).format == T::MPV_FORMAT as i32 {
+                Some(T::from_ptr((*self.0).data))
             } else {
                 None
             }
