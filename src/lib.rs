@@ -6,12 +6,39 @@ pub use error::{Error, Result};
 use ffi::*;
 pub use format::Format;
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::collections::HashMap;
+use std::ffi::{c_char, c_double, c_int, c_longlong, c_void, CStr, CString};
 use std::fmt;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ops::{Deref, DerefMut};
 use std::ptr::slice_from_raw_parts_mut;
 
 pub use ffi::mpv_handle;
+
+#[macro_export]
+macro_rules! map {
+    ($k: expr => $v: expr) => { map!($k => $v,) };
+    ($($k: expr => $v: expr,)*) => {
+        {
+            use std::collections::HashMap;
+            use $crate::NodeMap;
+            let mut map = HashMap::<String, _>::new();
+            $(map.insert($k.into(), $v.into());)*
+            NodeMap::new(map)
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! list {
+    ($v: expr) => { list!($v,) };
+    ($($v: expr,)*) => {
+        {
+            use $crate::NodeList;
+            NodeList(vec![$($v.into()),*])
+        }
+    };
+}
 
 /// Representation of a borrowed client context used by the client API.
 /// Every client has its own private handle.
@@ -112,6 +139,29 @@ pub struct ClientMessage(*const mpv_event_client_message);
 
 /// Data associated with `Event::Hook`.
 pub struct Hook(*const mpv_event_hook);
+
+#[derive(Debug, Default, Clone)]
+pub struct NodeMap(HashMap<String, Node>);
+
+#[derive(Debug, Default, Clone)]
+pub struct NodeList(pub Vec<Node>);
+
+#[derive(Debug, Default, Clone)]
+pub struct ByteArray(Vec<u8>);
+
+#[derive(Debug, Default, Clone)]
+pub enum Node {
+    String(String),
+    Flag(bool),
+    Int64(i64),
+    Double(f64),
+    Array(NodeList),
+    Map(NodeMap),
+    ByteArray(ByteArray),
+    #[default]
+    None,
+}
+pub struct RustOwnedNode(pub(crate) mpv_node);
 
 macro_rules! result {
     ($f:expr) => {
@@ -541,5 +591,221 @@ impl Hook {
 impl fmt::Display for Hook {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str(self.name())
+    }
+}
+
+impl Node {
+    pub fn format(&self) -> mpv_format {
+        match self {
+            Self::String(_) => mpv_format::MPV_FORMAT_STRING,
+            Self::Flag(_) => mpv_format::MPV_FORMAT_FLAG,
+            Self::Int64(_) => mpv_format::MPV_FORMAT_INT64,
+            Self::Double(_) => mpv_format::MPV_FORMAT_DOUBLE,
+            Self::Array(_) => mpv_format::MPV_FORMAT_NODE_ARRAY,
+            Self::Map(_) => mpv_format::MPV_FORMAT_NODE_MAP,
+            Self::ByteArray(_) => mpv_format::MPV_FORMAT_BYTE_ARRAY,
+            Self::None => mpv_format::MPV_FORMAT_NONE,
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `node` should be correctly initialized and if it contains a pointer, the pointer should be vaild
+    /// and this function does not take its ownship, so you need to free it properly.
+    pub unsafe fn from_mpv_node(node: &mpv_node) -> Self {
+        match node.format {
+            mpv_format::MPV_FORMAT_NONE => Self::None,
+            mpv_format::MPV_FORMAT_STRING => {
+                //
+                let str = CStr::from_ptr(node.u.string);
+                Self::String(str.to_string_lossy().into_owned())
+            }
+            mpv_format::MPV_FORMAT_FLAG => Self::Flag(node.u.flag == 1),
+            mpv_format::MPV_FORMAT_INT64 => Self::Int64(node.u.int64),
+            mpv_format::MPV_FORMAT_DOUBLE => Self::Double(node.u.double_),
+            mpv_format::MPV_FORMAT_NODE_ARRAY => Self::Array(NodeList::from_raw(node.u.list)),
+            mpv_format::MPV_FORMAT_NODE_MAP => Self::Map(NodeMap::from_raw(node.u.list)),
+            mpv_format::MPV_FORMAT_BYTE_ARRAY => Self::ByteArray(ByteArray::from_raw(node.u.ba)),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn to_raw_node(self) -> mpv_node {
+        let format = self.format();
+        match self {
+            Node::String(s) => {
+                let s = CString::new(s).unwrap();
+                mpv_node {
+                    u: Data { string: s.into_raw() },
+                    format,
+                }
+            }
+            Node::Flag(f) => mpv_node {
+                u: Data { flag: f as c_int },
+                format,
+            },
+            Node::Int64(i) => mpv_node {
+                u: Data { int64: i as c_longlong },
+                format,
+            },
+            Node::Double(d) => mpv_node {
+                u: Data { double_: d as c_double },
+                format,
+            },
+            Node::Array(arr) => {
+                let mut nodes = ManuallyDrop::new(arr.0.into_iter().map(Node::to_raw_node).collect::<Vec<_>>());
+                nodes.shrink_to_fit();
+                let list = Box::new(mpv_node_list {
+                    num: nodes.len() as i32,
+                    values: nodes.as_mut_ptr(),
+                    keys: std::ptr::null(),
+                });
+                mpv_node {
+                    u: Data {
+                        list: Box::into_raw(list),
+                    },
+                    format,
+                }
+            }
+            Node::Map(map) => {
+                let values = map
+                    .0
+                    .values()
+                    .map(|node| Node::to_raw_node(node.clone()))
+                    .collect::<Vec<_>>()
+                    .leak()
+                    .as_mut_ptr();
+                let keys = map
+                    .0
+                    .keys()
+                    .map(|k| CString::new(k.clone()).unwrap().into_raw() as *const c_char)
+                    .collect::<Vec<_>>()
+                    .leak()
+                    .as_ptr();
+                let list = Box::new(mpv_node_list {
+                    num: map.0.len() as i32,
+                    values,
+                    keys,
+                });
+                mpv_node {
+                    u: Data {
+                        list: Box::leak(list) as _,
+                    },
+                    format,
+                }
+            }
+            Node::ByteArray(ba) => {
+                let size = ba.0.len();
+                let raw_array = Box::new(mpv_byte_array {
+                    data: ba.0.leak().as_mut_ptr() as _,
+                    size,
+                });
+                mpv_node {
+                    u: Data {
+                        ba: Box::leak(raw_array) as _,
+                    },
+                    format,
+                }
+            }
+            Node::None => mpv_node {
+                u: Data { flag: 0 },
+                format,
+            },
+        }
+    }
+}
+
+impl From<String> for Node {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for Node {
+    fn from(value: &str) -> Self {
+        value.to_owned().into()
+    }
+}
+
+impl From<i64> for Node {
+    fn from(value: i64) -> Self {
+        Self::Int64(value)
+    }
+}
+
+impl From<NodeMap> for Node {
+    fn from(value: NodeMap) -> Self {
+        Self::Map(value)
+    }
+}
+
+impl From<NodeList> for Node {
+    fn from(value: NodeList) -> Self {
+        Self::Array(value)
+    }
+}
+
+impl NodeList {
+    /// # Safety
+    ///
+    /// `ptr` and its `values` should be valid, its `num` should be the length of `values`.
+    ///
+    /// This function does not take ownship of the `mpv_node_list`, so you need to free it properly.
+    pub unsafe fn from_raw(ptr: *mut mpv_node_list) -> Self {
+        let list = &*ptr;
+        let nodes = std::slice::from_raw_parts(list.values, list.num as usize);
+        Self(nodes.iter().map(|n| Node::from_mpv_node(n)).collect())
+    }
+}
+
+impl NodeMap {
+    pub fn new(map: HashMap<String, Node>) -> Self {
+        Self(map)
+    }
+
+    /// # Safety
+    ///
+    /// `ptr` and its `values` and `keys` should be valid, its `num` should be the length of `values`.
+    ///
+    /// This function does not take ownship of the `mpv_node_list`, so you need to free it properly.
+    pub unsafe fn from_raw(ptr: *mut mpv_node_list) -> Self {
+        let list = &*ptr;
+        let values = std::slice::from_raw_parts(list.values, list.num as usize);
+        let keys = std::slice::from_raw_parts(list.keys, list.num as usize);
+
+        let owned_values = values.iter().map(|n| Node::from_mpv_node(n));
+        let owned_keys = keys.iter().map(|k| CStr::from_ptr(*k).to_string_lossy().into_owned());
+
+        Self(owned_keys.zip(owned_values).collect())
+    }
+}
+
+impl ByteArray {
+    /// # Safety
+    ///
+    /// `ptr` and its `data` should be valid, its `size` should be the length of `data`.
+    ///
+    /// This function does not take ownship of the `mpv_byte_array`, so you need to free it properly.
+    pub unsafe fn from_raw(ptr: *mut mpv_byte_array) -> Self {
+        let list = &*ptr;
+        Self(std::slice::from_raw_parts(list.data as *const u8, list.size).to_vec())
+    }
+}
+
+impl Drop for RustOwnedNode {
+    fn drop(&mut self) {
+        let data = self.0.u;
+        match self.0.format {
+            mpv_format::MPV_FORMAT_STRING => unsafe {
+                let _ = CString::from_raw(data.string as _);
+            },
+            mpv_format::MPV_FORMAT_NODE_ARRAY => unsafe {
+                let list = Box::from_raw(data.list);
+                let _ = Vec::from_raw_parts(list.values, list.num as usize, list.num as usize);
+            },
+            mpv_format::MPV_FORMAT_NODE_MAP => todo!(),
+            mpv_format::MPV_FORMAT_BYTE_ARRAY => todo!(),
+            _ => {}
+        }
     }
 }
