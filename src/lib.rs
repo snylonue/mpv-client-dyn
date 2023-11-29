@@ -11,7 +11,7 @@ use std::ffi::{c_char, c_double, c_int, c_longlong, c_void, CStr, CString};
 use std::fmt;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ops::{Deref, DerefMut};
-use std::ptr::slice_from_raw_parts_mut;
+use std::ptr::{slice_from_raw_parts, slice_from_raw_parts_mut, NonNull};
 
 pub use ffi::mpv_handle;
 
@@ -161,6 +161,10 @@ pub enum Node {
     #[default]
     None,
 }
+
+#[derive(Debug)]
+pub struct RawNode(NonNull<mpv_node>);
+
 pub struct RustOwnedNode(pub(crate) mpv_node);
 
 macro_rules! result {
@@ -323,10 +327,18 @@ impl Handle {
         unsafe { result!(mpv_command_async(self.as_mut_ptr(), reply, raw_args.as_ptr())) }
     }
 
-    pub fn set_property<T: Format, S: AsRef<str>>(&mut self, name: S, data: T) -> Result<()> {
+    pub fn set_property<T: ToMpv, S: AsRef<str>>(&mut self, name: S, data: T) -> Result<()> {
         let name = CString::new(name.as_ref())?;
         let handle = unsafe { self.as_mut_ptr() };
-        data.to_mpv(|data| unsafe { result!(mpv_set_property(handle, name.as_ptr(), T::MPV_FORMAT, data)) })
+        let node = data.to_node();
+        result!(unsafe {
+            mpv_set_property(
+                handle,
+                name.as_ptr(),
+                mpv_format::MPV_FORMAT_NODE as i32,
+                &node.0 as *const _ as _,
+            )
+        })
     }
 
     /// Read the value of the given property.
@@ -335,10 +347,14 @@ impl Handle {
     /// usually will fail with `MPV_ERROR_PROPERTY_FORMAT`. In some cases, the data
     /// is automatically converted and access succeeds. For example, i64 is always
     /// converted to f64, and access using String usually invokes a string formatter.
-    pub fn get_property<T: Format, S: AsRef<str>>(&mut self, name: S) -> Result<T> {
+    pub fn get_property<T: FromMpv, S: AsRef<str>>(&mut self, name: S) -> Result<T> {
         let name = CString::new(name.as_ref())?;
         let handle = unsafe { self.as_mut_ptr() };
-        T::from_mpv(|data| unsafe { result!(mpv_get_property(handle, name.as_ptr(), T::MPV_FORMAT, data)) })
+        let mut val = MaybeUninit::<T::Raw>::uninit();
+        match unsafe { mpv_get_property(handle, name.as_ptr(), T::MPV_FORMAT as i32, val.as_mut_ptr() as _) } {
+            mpv_error::SUCCESS => Ok(unsafe { T::from_raw(val) }),
+            err => Err(Error::new(err)),
+        }
     }
 
     pub fn observe_property<S: AsRef<str>>(&mut self, reply: u64, name: S, format: i32) -> Result<()> {
@@ -653,11 +669,10 @@ impl Node {
                 format,
             },
             Node::Array(arr) => {
-                let mut nodes = ManuallyDrop::new(arr.0.into_iter().map(Node::to_raw_node).collect::<Vec<_>>());
-                nodes.shrink_to_fit();
+                let nodes = arr.0.into_iter().map(Node::to_raw_node).collect::<Box<[_]>>();
                 let list = Box::new(mpv_node_list {
                     num: nodes.len() as i32,
-                    values: nodes.as_mut_ptr(),
+                    values: Box::leak(nodes).as_mut_ptr(),
                     keys: std::ptr::null(),
                 });
                 mpv_node {
@@ -668,20 +683,20 @@ impl Node {
                 }
             }
             Node::Map(map) => {
-                let values = map
-                    .0
-                    .values()
-                    .map(|node| Node::to_raw_node(node.clone()))
-                    .collect::<Vec<_>>()
-                    .leak()
-                    .as_mut_ptr();
-                let keys = map
-                    .0
-                    .keys()
-                    .map(|k| CString::new(k.clone()).unwrap().into_raw() as *const c_char)
-                    .collect::<Vec<_>>()
-                    .leak()
-                    .as_ptr();
+                let values = Box::leak(
+                    map.0
+                        .values()
+                        .map(|node| Node::to_raw_node(node.clone()))
+                        .collect::<Box<[_]>>(),
+                )
+                .as_mut_ptr();
+                let keys = Box::leak(
+                    map.0
+                        .keys()
+                        .map(|k| CString::new(k.clone()).unwrap().into_raw() as *const c_char)
+                        .collect::<Box<[_]>>(),
+                )
+                .as_ptr();
                 let list = Box::new(mpv_node_list {
                     num: map.0.len() as i32,
                     values,
@@ -689,7 +704,7 @@ impl Node {
                 });
                 mpv_node {
                     u: Data {
-                        list: Box::leak(list) as _,
+                        list: Box::into_raw(list),
                     },
                     format,
                 }
@@ -697,12 +712,12 @@ impl Node {
             Node::ByteArray(ba) => {
                 let size = ba.0.len();
                 let raw_array = Box::new(mpv_byte_array {
-                    data: ba.0.leak().as_mut_ptr() as _,
+                    data: Box::leak(ba.0.into_boxed_slice()).as_mut_ptr() as _,
                     size,
                 });
                 mpv_node {
                     u: Data {
-                        ba: Box::leak(raw_array) as _,
+                        ba: Box::into_raw(raw_array),
                     },
                     format,
                 }
@@ -792,6 +807,12 @@ impl ByteArray {
     }
 }
 
+impl Default for RawNode {
+    fn default() -> Self {
+        Self(NonNull::dangling())
+    }
+}
+
 impl Drop for RustOwnedNode {
     fn drop(&mut self) {
         let data = self.0.u;
@@ -801,10 +822,20 @@ impl Drop for RustOwnedNode {
             },
             mpv_format::MPV_FORMAT_NODE_ARRAY => unsafe {
                 let list = Box::from_raw(data.list);
-                let _ = Vec::from_raw_parts(list.values, list.num as usize, list.num as usize);
+                let _ = Box::from_raw((&mut *slice_from_raw_parts_mut(list.values, list.num as usize)) as _);
             },
-            mpv_format::MPV_FORMAT_NODE_MAP => todo!(),
-            mpv_format::MPV_FORMAT_BYTE_ARRAY => todo!(),
+            mpv_format::MPV_FORMAT_NODE_MAP => unsafe {
+                let map = Box::from_raw(data.list);
+                let _ = Box::from_raw((&mut *slice_from_raw_parts_mut(map.values, map.num as usize)) as _);
+                let keys = Box::from_raw(&*slice_from_raw_parts(map.keys, map.num as usize) as *const _ as *mut [*const c_char]);
+                for k in keys.into_iter() {
+                    let _ = CString::from_raw(*k as _);
+                }
+            },
+            mpv_format::MPV_FORMAT_BYTE_ARRAY => unsafe {
+                let ba = Box::from_raw(data.ba);
+                let _ = Box::from_raw((&mut *slice_from_raw_parts_mut(ba.data, ba.size)) as _);
+            },
             _ => {}
         }
     }
