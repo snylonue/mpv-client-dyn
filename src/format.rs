@@ -7,7 +7,7 @@ use super::ffi::mpv_free;
 
 use std::{
     ffi::{c_char, c_longlong, c_void, CStr, CString},
-    mem::MaybeUninit,
+    mem::MaybeUninit, collections::HashMap,
 };
 
 /// # Safety
@@ -107,6 +107,13 @@ unsafe impl<T: Into<Node>> ToMpv for Vec<T> {
     fn to_node(self) -> RustOwnedNode {
         let nodes = self.into_iter().map(|v| v.into()).collect();
         Node::Array(NodeList(nodes)).to_node()
+    }
+}
+
+unsafe impl<K: ToString, V: Into<Node>> ToMpv for HashMap<K, V> {
+    fn to_node(self) -> RustOwnedNode {
+        let nodes = self.into_iter().map(|(k, v)| (k.to_string(), v.into())).collect();
+        Node::Map(crate::NodeMap(nodes)).to_node()
     }
 }
 
