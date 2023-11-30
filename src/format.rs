@@ -1,6 +1,6 @@
 use crate::{
-    ffi::{mpv_format, mpv_node},
-    Node, RustOwnedNode,
+    ffi::{mpv_format, mpv_node, Data},
+    Node, RustOwnedNode, NodeList,
 };
 
 use super::ffi::mpv_free;
@@ -84,13 +84,26 @@ pub unsafe trait ToMpv {
     fn to_node(self) -> RustOwnedNode;
 }
 
+unsafe impl ToMpv for String {
+    fn to_node(self) -> RustOwnedNode {
+        self.as_str().to_node()
+    }
+}
+
 unsafe impl ToMpv for &str {
     fn to_node(self) -> RustOwnedNode {
         let s = CString::new(self).unwrap();
         RustOwnedNode(mpv_node {
-            u: crate::ffi::Data { string: s.into_raw() },
+            u: Data { string: s.into_raw() },
             format: mpv_format::MPV_FORMAT_STRING,
         })
+    }
+}
+
+unsafe impl<T: Into<Node>> ToMpv for Vec<T> {
+    fn to_node(self) -> RustOwnedNode {
+        let nodes = self.into_iter().map(|v| v.into()).collect();
+        Node::Array(NodeList(nodes)).to_node()
     }
 }
 
