@@ -1,6 +1,6 @@
 use crate::{
-    ffi::{mpv_format, mpv_node, Data},
-    Node, RustOwnedNode, NodeList,
+    ffi::{mpv_format, mpv_free_node_contents, mpv_node, Data},
+    Node, NodeList, RustOwnedNode,
 };
 
 use super::ffi::mpv_free;
@@ -72,7 +72,10 @@ unsafe impl FromMpv for Node {
     }
 
     unsafe fn from_raw(inited: MaybeUninit<Self::Raw>) -> Self {
-        Self::from_mpv_node(&inited.assume_init())
+        let raw_node = inited.assume_init();
+        let node = Self::from_mpv_node(&raw_node);
+        mpv_free_node_contents(&raw_node as *const _ as _);
+        node
     }
 }
 
