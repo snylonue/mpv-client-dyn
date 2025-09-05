@@ -7,7 +7,14 @@ use once_cell::sync::Lazy;
 
 type LazySymbol<T> = Lazy<Symbol<'static, T>>;
 
-pub static MPV_LIB: Lazy<Library> = Lazy::new(|| unsafe { Library::new("mpv.exe").unwrap() });
+pub static MPV_LIB: Lazy<Library> = Lazy::new(|| unsafe {
+    #[cfg(windows)]
+    let mpv_binary = "mpv.exe";
+    #[cfg(unix)]
+    let mpv_binary = "libmpv.so";
+    
+    Library::new(mpv_binary).unwrap()
+});
 
 pub static mpv_error_string: LazySymbol<unsafe extern "C" fn(mpv_error) -> *const c_char> =
     Lazy::new(|| unsafe { MPV_LIB.get(b"mpv_error_string").unwrap() });
